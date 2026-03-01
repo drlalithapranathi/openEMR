@@ -9,34 +9,38 @@
  *   GET  ?action=key_status    → returns whether Groq API key is saved in OpenEMR globals table
  *   POST ?action=save_key      → saves Groq API key into OpenEMR globals table
  *   POST ?action=import&name=X → fetch ELM → simplify → Groq validates → insert into DB
- *
- * @package   OpenEMR
- * @link      https://www.open-emr.org
  */
 
+// ── Load OpenEMR globals.php ──────────────────────────────────────────────────
+// From templates/super/rules/controllers/browse/ → up 5 levels → interface/
 require_once(__DIR__ . '/../../../../../interface/globals.php');
 
 use OpenEMR\Common\Acl\AclMain;
 
 header('Content-Type: application/json');
 
+// ── Auth ──────────────────────────────────────────────────────────────────────
 if (!AclMain::aclCheckCore('admin', 'super')) {
     http_response_code(403);
     echo json_encode(['error' => 'Unauthorized']);
     exit;
 }
 
+// ── Config ────────────────────────────────────────────────────────────────────
 $CQL_SERVICE_URL = 'https://cdsconnect.org';
 $GROQ_MODEL      = 'openai/gpt-oss-120b';
 $GROQ_ENDPOINT   = 'https://api.groq.com/openai/v1/chat/completions';
 
+// ── Route ─────────────────────────────────────────────────────────────────────
 $action = $_GET['action'] ?? 'validate';
 
 try {
     if ($action === 'validate') {
         handleValidate($CQL_SERVICE_URL);
+
     } elseif ($action === 'key_status') {
         handleKeyStatus();
+
     } elseif ($action === 'save_key') {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
             http_response_code(405);
@@ -44,6 +48,7 @@ try {
             exit;
         }
         handleSaveKey();
+
     } elseif ($action === 'import' && isset($_GET['name'])) {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
             http_response_code(405);
@@ -51,10 +56,12 @@ try {
             exit;
         }
         handleImport(trim($_GET['name']), $CQL_SERVICE_URL, $GROQ_MODEL, $GROQ_ENDPOINT);
+
     } else {
         http_response_code(400);
         echo json_encode(['error' => 'Invalid action']);
     }
+
 } catch (Exception $e) {
     error_log('CDS Proxy Error: ' . $e->getMessage());
     http_response_code(500);
@@ -62,7 +69,10 @@ try {
 }
 
 
-// ── Groq API Key — stored in OpenEMR globals table ────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// GROQ API KEY — stored in OpenEMR globals table as 'cds_groq_api_key'
+// Reads/writes directly from DB — no need to modify interface/globals.php
+// ═══════════════════════════════════════════════════════════════════════════════
 
 function getGroqApiKey(): string
 {
@@ -98,6 +108,11 @@ function handleSaveKey(): void
 }
 
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ACTION: validate
+// Calls CDS Connect /cds-services/ and normalises response into:
+//   { valid_libraries: [{name, version, imported}], invalid_libraries: [] }
+// ═══════════════════════════════════════════════════════════════════════════════
 function handleValidate(string $cqlUrl): void
 {
     $ch = curl_init($cqlUrl . '/cds-services/');
@@ -109,12 +124,19 @@ function handleValidate(string $cqlUrl): void
     $curlErr  = curl_error($ch);
     curl_close($ch);
 
-    if ($curlErr) throw new Exception('CQL service unreachable: ' . $curlErr);
-    if ($httpCode !== 200) throw new Exception('CQL service returned HTTP ' . $httpCode);
+    if ($curlErr) {
+        throw new Exception('CQL service unreachable: ' . $curlErr);
+    }
+    if ($httpCode !== 200) {
+        throw new Exception('CQL service returned HTTP ' . $httpCode);
+    }
 
     $data = json_decode($response, true);
-    if (!is_array($data)) throw new Exception('Invalid JSON from CQL service');
+    if (!is_array($data)) {
+        throw new Exception('Invalid JSON from CQL service');
+    }
 
+    // CDS Connect returns { services: [{id, hook, title, description, prefetch}] }
     $validLibs = [];
     foreach ($data['services'] ?? [] as $svc) {
         $name  = $svc['id']    ?? ($svc['name'] ?? '');
@@ -139,6 +161,11 @@ function handleValidate(string $cqlUrl): void
 }
 
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ACTION: import
+// Fetches ELM → checks embedded errors → Groq validates → inserts into DB
+// Fails explicitly if Groq API key is not configured
+// ═══════════════════════════════════════════════════════════════════════════════
 function handleImport(
     string $libraryName,
     string $cqlUrl,
@@ -147,6 +174,7 @@ function handleImport(
 ): void {
     $ruleId = slugifyRuleId($libraryName);
 
+    // Already imported?
     $existing = sqlQuery("SELECT id FROM clinical_rules WHERE id = ?", [$ruleId]);
     if ($existing) {
         http_response_code(409);
@@ -154,6 +182,7 @@ function handleImport(
         return;
     }
 
+    // Require Groq key — do not fall back to structural-only validation
     $groqKey = getGroqApiKey();
     if (empty($groqKey)) {
         http_response_code(422);
@@ -164,8 +193,10 @@ function handleImport(
         return;
     }
 
+    // Fetch ELM JSON from CQL service
     $elmJson = fetchElmJson($cqlUrl, $libraryName);
 
+    // Check embedded CQL-to-ELM compilation errors
     $embeddedErrors = extractEmbeddedErrors($elmJson);
     if (!empty($embeddedErrors)) {
         http_response_code(422);
@@ -176,6 +207,7 @@ function handleImport(
         return;
     }
 
+    // Groq LLM validation
     $validation = validateWithGroq($elmJson, $groqKey, $groqModel, $groqEndpoint);
     if (!$validation['valid']) {
         http_response_code(422);
@@ -186,6 +218,7 @@ function handleImport(
         return;
     }
 
+    // Import into OpenEMR DB
     importElmToOpenEmr($elmJson, $ruleId, $libraryName);
 
     echo json_encode([
@@ -196,6 +229,7 @@ function handleImport(
 }
 
 
+// ── Fetch ELM JSON from CDS Connect ──────────────────────────────────────────
 function fetchElmJson(string $cqlUrl, string $libraryName): array
 {
     $urlsToTry = [
@@ -226,11 +260,248 @@ function fetchElmJson(string $cqlUrl, string $libraryName): array
 }
 
 
-function simplifyElmForPrompt(array $elmJson): string
+// ═══════════════════════════════════════════════════════════════════════════════
+// ELM SIMPLIFIER — PHP port of elm_simplifier.py
+//
+// Two functions mirror the reference Python implementation:
+//   parseExpression()     → parse_expression()   — recursive ELM→text
+//   simplifyElm()         → simplify_elm()       — full logic summary
+//   keyValuesSection()    → simplify_elm_for_gemini() — age/time/vs only
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Recursively convert one ELM expression node into human-readable text.
+ * PHP port of parse_expression() from elm_simplifier.py
+ */
+function parseExpression($expr, int $depth = 0): string
 {
-    $library = $elmJson['library'] ?? [];
-    $libName = $library['identifier']['id'] ?? 'Unknown';
-    $lines   = ["Library: {$libName}", ''];
+    if (!is_array($expr)) return (string)$expr;
+
+    $type = $expr['type'] ?? '';
+
+    // Literal values
+    if ($type === 'Literal') {
+        $value     = $expr['value'] ?? '?';
+        $valueType = preg_replace('/^.*\}/', '', $expr['valueType'] ?? '');
+        return "{$value} ({$valueType})";
+    }
+
+    // Quantity (time intervals, dosages)
+    if ($type === 'Quantity') {
+        return ($expr['value'] ?? '?') . ' ' . ($expr['unit'] ?? '');
+    }
+
+    // Age calculation
+    if ($type === 'CalculateAge') {
+        $precision = $expr['precision'] ?? 'Year';
+        return "Patient's age in " . strtolower($precision) . "s";
+    }
+
+    // Comparison operators
+    $opMap = ['GreaterOrEqual' => '>=', 'Greater' => '>', 'LessOrEqual' => '<=', 'Less' => '<', 'Equal' => '='];
+    if (isset($opMap[$type])) {
+        $operands = $expr['operand'] ?? [];
+        if (count($operands) >= 2) {
+            return parseExpression($operands[0], $depth) . ' ' . $opMap[$type] . ' ' . parseExpression($operands[1], $depth);
+        }
+    }
+
+    // Boolean operators
+    if ($type === 'And') {
+        $parts = array_map(fn($op) => parseExpression($op, $depth), $expr['operand'] ?? []);
+        return implode(' AND ', $parts);
+    }
+    if ($type === 'Or') {
+        $parts = array_map(fn($op) => parseExpression($op, $depth), $expr['operand'] ?? []);
+        return implode(' OR ', $parts);
+    }
+    if ($type === 'Not') {
+        return 'NOT (' . parseExpression($expr['operand'] ?? [], $depth) . ')';
+    }
+
+    // Existence check
+    if ($type === 'Exists') {
+        return 'EXISTS (' . parseExpression($expr['operand'] ?? [], $depth) . ')';
+    }
+
+    // Named definition reference
+    if ($type === 'ExpressionRef') {
+        return '[' . ($expr['name'] ?? '?') . ']';
+    }
+
+    // Function call
+    if ($type === 'FunctionRef') {
+        $args = array_map(fn($op) => parseExpression($op, $depth), $expr['operand'] ?? []);
+        return ($expr['name'] ?? '?') . '(' . implode(', ', $args) . ')';
+    }
+
+    // Value set reference
+    if ($type === 'ValueSetRef') {
+        return 'ValueSet "' . ($expr['name'] ?? '?') . '"';
+    }
+
+    // FHIR data retrieval
+    if ($type === 'Retrieve') {
+        $dataType = preg_replace('/^.*\}/', '', $expr['dataType'] ?? '');
+        $codes    = $expr['codes'] ?? [];
+        if (!empty($codes) && isset($codes['name'])) {
+            return "Retrieve {$dataType} where type in ValueSet \"{$codes['name']}\"";
+        }
+        return "Retrieve {$dataType}";
+    }
+
+    // Conditional
+    if ($type === 'If') {
+        $cond = parseExpression($expr['condition'] ?? [], $depth);
+        $then = parseExpression($expr['then']      ?? [], $depth);
+        $else = parseExpression($expr['else']      ?? [], $depth);
+        return "IF {$cond} THEN {$then} ELSE {$else}";
+    }
+
+    if ($type === 'Null') return 'null';
+
+    // Type cast — just unwrap
+    if ($type === 'As') {
+        return parseExpression($expr['operand'] ?? [], $depth);
+    }
+
+    // Interval
+    if ($type === 'Interval') {
+        $low  = parseExpression($expr['low']  ?? [], $depth);
+        $high = parseExpression($expr['high'] ?? [], $depth);
+        $lc   = ($expr['lowClosed']  ?? true) ? '[' : '(';
+        $hc   = ($expr['highClosed'] ?? true) ? ']' : ')';
+        return "{$lc}{$low} to {$high}{$hc}";
+    }
+
+    // Arithmetic
+    if ($type === 'Subtract') {
+        $operands = $expr['operand'] ?? [];
+        if (count($operands) >= 2) {
+            return parseExpression($operands[0], $depth) . ' - ' . parseExpression($operands[1], $depth);
+        }
+    }
+    if ($type === 'Now') return 'Now';
+
+    // Function parameter reference
+    if ($type === 'OperandRef') {
+        return '$' . ($expr['name'] ?? '?');
+    }
+
+    // Query (FROM ... WHERE ...)
+    if ($type === 'Query') {
+        $parts = [];
+        foreach ($expr['source'] ?? [] as $src) {
+            $alias   = $src['alias'] ?? '';
+            $srcExpr = parseExpression($src['expression'] ?? [], $depth);
+            $parts[] = "FROM {$srcExpr} AS {$alias}";
+        }
+        foreach ($expr['let'] ?? [] as $let) {
+            $parts[] = 'LET ' . ($let['identifier'] ?? '?') . ' = ' . parseExpression($let['expression'] ?? [], $depth);
+        }
+        if (!empty($expr['where'])) {
+            $parts[] = 'WHERE ' . parseExpression($expr['where'], $depth);
+        }
+        return implode(' ', $parts);
+    }
+
+    if ($type === 'QueryLetRef') {
+        return '$' . ($expr['name'] ?? '?');
+    }
+
+    // Interval overlap
+    if ($type === 'Overlaps') {
+        $operands = $expr['operand'] ?? [];
+        if (count($operands) >= 2) {
+            return '(' . parseExpression($operands[0], $depth) . ') OVERLAPS (' . parseExpression($operands[1], $depth) . ')';
+        }
+    }
+
+    // Property access
+    if ($type === 'Property') {
+        $path  = $expr['path']  ?? '?';
+        $scope = $expr['scope'] ?? '';
+        if ($scope) return "{$scope}.{$path}";
+        return parseExpression($expr['source'] ?? [], $depth) . ".{$path}";
+    }
+
+    if ($type === 'Count') {
+        return 'COUNT(' . parseExpression($expr['source'] ?? [], $depth) . ')';
+    }
+
+    if ($type === 'SingletonFrom') {
+        return parseExpression($expr['operand'] ?? [], $depth);
+    }
+
+    // Fallback — show type name so LLM knows something is there
+    return "[{$type}]";
+}
+
+/**
+ * Convert full ELM JSON into a human-readable clinical logic summary.
+ * PHP port of simplify_elm() from elm_simplifier.py
+ */
+function simplifyElm(array $elmJson): string
+{
+    $library    = $elmJson['library'] ?? [];
+    $identifier = $library['identifier'] ?? [];
+    $lines      = [];
+
+    $libName    = $identifier['id']      ?? 'Unknown';
+    $libVersion = $identifier['version'] ?? '';
+    $lines[]    = "# ELM Logic Summary: {$libName} {$libVersion}";
+    $lines[]    = '';
+
+    // Value Sets
+    $valueSets = $library['valueSets']['def'] ?? [];
+    if (!empty($valueSets)) {
+        $lines[] = '## Value Sets Referenced';
+        foreach ($valueSets as $vs) {
+            $name  = $vs['name'] ?? 'Unknown';
+            $raw   = $vs['id']   ?? '';
+            $oid   = substr($raw, (int)strrpos($raw, '/') + 1);
+            $lines[] = "- {$name}: {$oid}";
+        }
+        $lines[] = '';
+    }
+
+    // Statements — the actual clinical logic
+    $statements = $library['statements']['def'] ?? [];
+    if (!empty($statements)) {
+        $lines[] = '## Clinical Logic Definitions';
+        $lines[] = '';
+        foreach ($statements as $stmt) {
+            $name = $stmt['name'] ?? 'Unknown';
+            $expr = $stmt['expression'] ?? [];
+
+            // Skip the internal Patient singleton
+            if ($name === 'Patient' && ($expr['type'] ?? '') === 'SingletonFrom') continue;
+
+            $summary = parseExpression($expr, 0);
+
+            if (($stmt['type'] ?? '') === 'FunctionDef') {
+                $params  = implode(', ', array_map(fn($op) => $op['name'] ?? '?', $stmt['operand'] ?? []));
+                $lines[] = "### {$name}({$params})";
+            } else {
+                $lines[] = "### {$name}";
+            }
+
+            $lines[] = $summary;
+            $lines[] = '';
+        }
+    }
+
+    return implode("\n", $lines);
+}
+
+/**
+ * Extract key values section (age thresholds, time intervals, value sets).
+ * PHP port of simplify_elm_for_gemini() from elm_simplifier.py
+ */
+function keyValuesSection(array $elmJson): string
+{
+    $library    = $elmJson['library'] ?? [];
+    $identifier = $library['identifier'] ?? [];
 
     $ageThresholds = [];
     $timeIntervals = [];
@@ -243,8 +514,8 @@ function simplifyElmForPrompt(array $elmJson): string
         $valueSets[] = "- {$name}: {$oid}";
     }
 
-    $walk = null;
-    $walk = function ($expr, string $ctx) use (&$walk, &$ageThresholds, &$timeIntervals): void {
+    $extract = null;
+    $extract = function ($expr, string $ctx) use (&$extract, &$ageThresholds, &$timeIntervals): void {
         if (!is_array($expr)) return;
         $type  = $expr['type'] ?? '';
         $opMap = ['GreaterOrEqual' => '>=', 'Greater' => '>', 'LessOrEqual' => '<=', 'Less' => '<', 'Equal' => '='];
@@ -257,26 +528,40 @@ function simplifyElmForPrompt(array $elmJson): string
                 $ageThresholds[] = "- Age {$opMap[$type]} {$value} " . strtolower($precision) . "s (in: {$ctx})";
             }
         }
+
         if ($type === 'Quantity') {
             $timeIntervals[] = "- " . ($expr['value'] ?? '?') . " " . ($expr['unit'] ?? '') . " (in: {$ctx})";
         }
+
         foreach ($expr as $val) {
             if (is_array($val)) {
-                if (isset($val['type'])) $walk($val, $ctx);
-                else foreach ($val as $item) { if (is_array($item)) $walk($item, $ctx); }
+                if (isset($val['type'])) {
+                    $extract($val, $ctx);
+                } else {
+                    foreach ($val as $item) {
+                        if (is_array($item)) $extract($item, $ctx);
+                    }
+                }
             }
         }
     };
 
     foreach ($library['statements']['def'] ?? [] as $stmt) {
         $name = $stmt['name'] ?? 'Unknown';
-        if (!empty($stmt['expression'])) $walk($stmt['expression'], $name);
+        if (!empty($stmt['expression'])) $extract($stmt['expression'], $name);
+        foreach ($stmt['operand'] ?? [] as $op) {
+            if (is_array($op)) $extract($op, $name);
+        }
     }
 
+    $lines   = [];
+    $libName = $identifier['id'] ?? 'Unknown';
+    $lines[] = "Library: {$libName}";
+    $lines[] = '';
     $lines[] = '**Age Thresholds:**';
     foreach ($ageThresholds ?: ['- None specified'] as $l) $lines[] = $l;
     $lines[] = '';
-    $lines[] = '**Time Intervals:**';
+    $lines[] = '**Time Intervals (Lookback Periods):**';
     foreach ($timeIntervals ?: ['- None specified'] as $l) $lines[] = $l;
     $lines[] = '';
     $lines[] = '**Value Sets:**';
@@ -285,13 +570,26 @@ function simplifyElmForPrompt(array $elmJson): string
     return implode("\n", $lines);
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GROQ VALIDATION — follows build_gemini_prompt (without CPG) pattern
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Build prompt matching build_gemini_prompt() without CPG.
+ * Without a CPG file, uses a lenient "clinically reasonable?" check.
+ * Sends BOTH the key-values summary AND the full parsed logic summary.
+ */
 function buildGroqPrompt(array $elmJson): string
 {
-    $summary = simplifyElmForPrompt($elmJson);
-    return "You are a clinical decision support validator.\n\n"
-         . "Review this CQL library and determine if it is valid for import into OpenEMR.\n\n"
-         . $summary . "\n\n"
-         . "Respond in exactly this format:\n"
+    $keyValues = keyValuesSection($elmJson);
+    $fullLogic = simplifyElm($elmJson);
+
+    return "Analyze this clinical logic implementation.\n\n"
+         . $keyValues . "\n\n"
+         . "## Full Logic Summary\n\n"
+         . $fullLogic . "\n\n"
+         . "Are the values clinically reasonable?\n\n"
          . "VALID: YES or NO\n"
          . "ERRORS: None, or list issues";
 }
@@ -322,6 +620,7 @@ function parseGroqResponse(string $text): array
 
 function validateWithGroq(array $elmJson, string $groqKey, string $groqModel, string $groqEndpoint): array
 {
+    // Structural checks always run first
     if (empty($elmJson['library'])) {
         return ['valid' => false, 'errors' => ['Missing top-level "library" key']];
     }
@@ -354,17 +653,28 @@ function validateWithGroq(array $elmJson, string $groqKey, string $groqModel, st
     $curlErr  = curl_error($ch);
     curl_close($ch);
 
-    if ($curlErr) return ['valid' => false, 'errors' => ['Groq API connection failed: ' . $curlErr]];
-    if ($httpCode === 401) return ['valid' => false, 'errors' => ['Groq API key is invalid or expired. Please update it in the settings above.']];
-    if ($httpCode !== 200) return ['valid' => false, 'errors' => ['Groq API returned HTTP ' . $httpCode]];
+    if ($curlErr) {
+        return ['valid' => false, 'errors' => ['Groq API connection failed: ' . $curlErr]];
+    }
+    if ($httpCode === 401) {
+        return ['valid' => false, 'errors' => ['Groq API key is invalid or expired. Please update it in the settings above.']];
+    }
+    if ($httpCode !== 200) {
+        return ['valid' => false, 'errors' => ['Groq API returned HTTP ' . $httpCode]];
+    }
 
     $content = json_decode($response, true)['choices'][0]['message']['content'] ?? '';
-    if (empty($content)) return ['valid' => false, 'errors' => ['Empty response from Groq API']];
+    if (empty($content)) {
+        return ['valid' => false, 'errors' => ['Empty response from Groq API']];
+    }
 
     return parseGroqResponse($content);
 }
 
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// DB IMPORT — field_mapping.json rules
+// ═══════════════════════════════════════════════════════════════════════════════
 function importElmToOpenEmr(array $elmJson, string $ruleId, string $libraryName): void
 {
     $library = $elmJson['library'] ?? [];
@@ -385,6 +695,13 @@ function importElmToOpenEmr(array $elmJson, string $ruleId, string $libraryName)
     $reminderMessage = $recText ?? "Imported from CQL library: {$libraryName}";
     if ($ratText) $reminderMessage .= "\n\nRationale: " . $ratText;
 
+    // Human-readable title: replace dashes/underscores with spaces, title-case
+    $ruleTitle = ucwords(str_replace(['-', '_'], ' ', $libraryName));
+
+    // Unique action item name for this rule (max 31 chars, prefixed 'cds_')
+    $actionItem = 'cds_' . substr($ruleId, 0, 27);
+
+    // 1. Main rule record
     sqlStatement(
         "INSERT INTO clinical_rules
             (id, pid, active_alert_flag, passive_alert_flag, patient_reminder_flag,
@@ -393,16 +710,34 @@ function importElmToOpenEmr(array $elmJson, string $ruleId, string $libraryName)
         [$ruleId, $version]
     );
 
+    // 2. Display title — required for the rule to appear with a name in OpenEMR UI
+    //    activity=1 makes it visible; edit_options=1 allows editing in admin Lists UI
     sqlStatement(
-        "INSERT INTO rule_action (id, category, item) VALUES (?, 'reminder_clin', 'clin_reminder_a')",
-        [$ruleId]
+        "INSERT INTO list_options (list_id, option_id, title, seq, is_default, activity, edit_options)
+         VALUES ('clinical_rules', ?, ?, 10, 0, 1, 1)",
+        [$ruleId, $ruleTitle]
     );
 
+    // 3. Action item — stores the reminder text shown in the patient chart
+    //    Uses act_cat_assess (a valid existing category) with a unique item per rule
+    sqlStatement(
+        "INSERT INTO rule_action_item (category, item, reminder_message, custom_flag)
+         VALUES ('act_cat_assess', ?, ?, 1)",
+        [$actionItem, $reminderMessage]
+    );
+
+    // 4. Action binding — links rule → (category, item)
+    sqlStatement(
+        "INSERT INTO rule_action (id, category, item) VALUES (?, 'act_cat_assess', ?)",
+        [$ruleId, $actionItem]
+    );
+
+    // 5. Reminder timing (best-effort; safe to skip if column structure differs)
     try {
         sqlStatement(
             "INSERT INTO rule_reminder (id, method, method_detail, value)
-             VALUES (?, 'clinical_reminder_pre', 'month', ?)",
-            [$ruleId, $reminderMessage]
+             VALUES (?, 'clinical_reminder_pre', 'month', '1')",
+            [$ruleId]
         );
     } catch (Exception $e) {
         error_log("CDS Import: rule_reminder insert skipped — " . $e->getMessage());
@@ -410,6 +745,9 @@ function importElmToOpenEmr(array $elmJson, string $ruleId, string $libraryName)
 }
 
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
 function extractEmbeddedErrors(array $elmJson): array
 {
     $errors = [];
