@@ -987,7 +987,7 @@ DELETE FROM rule_reminder WHERE id IN (...);
 
 These Python files were NOT deployed — their logic was ported to PHP:
 
-| Prof's Python function      | PHP equivalent in cds_proxy.php  |
+| Python function (reference) | PHP equivalent in cds_proxy.php  |
 |-----------------------------|----------------------------------|
 | simplify_elm_for_prompt()   | simplifyElmForPrompt()           |
 | build_prompt()              | buildGroqPrompt()                |
