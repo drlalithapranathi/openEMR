@@ -7,8 +7,8 @@
  * Workflow:
  *   1. Page loads → auto-fetches available CQL libraries alongside existing OpenEMR rules
  *   2. User clicks "Validate & Import" → proxy fetches ELM JSON from CQL service
- *   3. ELM is simplified and sent to Groq openai/gpt-oss-120b for validation
- *   4. If VALID → imported into clinical_rules/rule_action tables
+ *   3. ELM is simplified (elm_simplifier logic) and sent to Groq openai/gpt-oss-120b
+ *   4. If VALID → imported into clinical_rules/rule_action tables using field_mapping
  *   5. If INVALID → Groq's error is shown to the user
  *
  * @package   OpenEMR
@@ -39,6 +39,84 @@ $(document).ready(function () {
     }
 
     // ----------------------------------------------------------------
+    // Groq API Key — check status on load, allow saving from the UI
+    // Key is stored in OpenEMR globals table (gl_name = cds_groq_api_key)
+    // ----------------------------------------------------------------
+    checkKeyStatus();
+
+    $('#cds-save-key-btn').on('click', function () {
+        saveGroqKey();
+    });
+
+    // Single delegated binding — works even after bar HTML is re-rendered
+    $(document).on('click', '#cds-toggle-key-link', function (e) {
+        e.preventDefault();
+        $('#cds-key-form').toggle();
+        if ($('#cds-key-form').is(':visible')) {
+            $('#cds-groq-key-input').focus();
+        }
+    });
+
+    function checkKeyStatus() {
+        $.ajax({
+            url:      CDS_PROXY + '?action=key_status',
+            method:   'GET',
+            dataType: 'json',
+            success: function (data) {
+                var $bar = $('#cds-key-status-bar');
+                if (data.configured) {
+                    $bar.removeClass('alert-warning alert-info').addClass('alert-success')
+                        .html('<strong><?php echo xlt('Groq API Key'); ?>: <?php echo xlt('Configured'); ?> \u2713</strong>' +
+                              ' &nbsp;<a href="#" id="cds-toggle-key-link" class="small"><?php echo xlt('Update Key'); ?></a>');
+                    $('#cds-key-form').hide();
+                } else {
+                    $bar.removeClass('alert-success alert-info').addClass('alert-warning')
+                        .html('<strong>\u26a0 <?php echo xlt('Groq API Key not set'); ?></strong>' +
+                              ' &mdash; <?php echo xlt('Enter your Groq API key below to enable AI validation.'); ?>');
+                    $('#cds-key-form').show();
+                    $('#cds-groq-key-input').focus();
+                }
+            }
+        });
+    }
+
+    function saveGroqKey() {
+        var key  = $('#cds-groq-key-input').val().trim();
+        var $btn = $('#cds-save-key-btn');
+
+        if (!key) {
+            alert('<?php echo xlt('Please enter your Groq API key'); ?>');
+            return;
+        }
+
+        $btn.prop('disabled', true).text('<?php echo xlt('Saving...'); ?>');
+
+        $.ajax({
+            url:         CDS_PROXY + '?action=save_key',
+            method:      'POST',
+            contentType: 'application/json',
+            data:        JSON.stringify({ key: key }),
+            dataType:    'json',
+            success: function (data) {
+                $btn.prop('disabled', false).text('<?php echo xlt('Save Key'); ?>');
+                if (data.success) {
+                    $('#cds-groq-key-input').val('');
+                    $('#cds-key-form').hide();
+                    checkKeyStatus();
+                } else {
+                    alert('<?php echo xlt('Error saving key'); ?>: ' + (data.error || ''));
+                }
+            },
+            error: function (xhr) {
+                $btn.prop('disabled', false).text('<?php echo xlt('Save Key'); ?>');
+                var msg = '';
+                try { msg = JSON.parse(xhr.responseText).error || ''; } catch (e) {}
+                alert('<?php echo xlt('Error saving key'); ?>: ' + msg);
+            }
+        });
+    }
+
+    // ----------------------------------------------------------------
     // Auto-load CDS libraries when the CDR rules page opens
     // ----------------------------------------------------------------
     loadCdsLibraries();
@@ -63,7 +141,7 @@ $(document).ready(function () {
             url:      CDS_PROXY + '?action=validate',
             method:   'GET',
             dataType: 'json',
-            timeout:  190000,
+            timeout:  190000,   // CQL /validate can take up to 3 min
             success: function (data) {
                 $btn.prop('disabled', false).text('<?php echo xlt('Refresh'); ?>');
                 renderTable(data);
@@ -82,6 +160,12 @@ $(document).ready(function () {
         });
     }
 
+    // ----------------------------------------------------------------
+    // Build the available-libraries table
+    // valid_libraries   → CQL-valid, may or may not already be imported
+    // invalid_libraries → CQL-invalid, cannot be imported
+    // The proxy augments each entry with imported: true/false
+    // ----------------------------------------------------------------
     function renderTable(data) {
         var $container = $('#cds-table-container');
         var allLibs    = [];
@@ -149,11 +233,16 @@ $(document).ready(function () {
         html += '</tbody></table>';
         $container.html(html);
 
+        // Bind import buttons after rendering
         $container.on('click', '.import-btn', function () {
             importLibrary($(this).data('lib'), $(this));
         });
     }
 
+    // ----------------------------------------------------------------
+    // Import a library:
+    //   proxy fetches ELM → simplifies → Groq validates → DB import
+    // ----------------------------------------------------------------
     function importLibrary(libName, $btn) {
         var rowId = 'cds-row-' + String(libName).replace(/[^a-zA-Z0-9]/g, '_');
 
@@ -242,6 +331,7 @@ $(document).ready(function () {
 
 <!-- ================================================================
      CDS Libraries Section
+     Shows what is available in the CQL service and can be imported
      ================================================================ -->
 <div class="mt-3 mb-4">
     <div class="header">
@@ -253,6 +343,21 @@ $(document).ready(function () {
                 </button>
             </span>
         </header>
+    </div>
+    <!-- Groq API Key Settings -->
+    <div id="cds-key-status-bar" class="alert alert-info py-2 mb-2 small">
+        <span class="spinner-border spinner-border-sm mr-1" role="status"></span>
+        <?php echo xlt('Checking Groq API key status...'); ?>
+    </div>
+    <div id="cds-key-form" class="form-inline mb-2" style="display:none">
+        <input type="password" id="cds-groq-key-input"
+               class="form-control form-control-sm mr-2"
+               placeholder="gsk_..."
+               style="width:340px"
+               autocomplete="new-password">
+        <button id="cds-save-key-btn" class="btn btn-sm btn-primary" type="button">
+            <?php echo xlt('Save Key'); ?>
+        </button>
     </div>
 
     <div id="cds-table-container" class="mt-2 border rounded p-2 bg-white">

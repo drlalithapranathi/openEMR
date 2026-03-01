@@ -6,6 +6,8 @@
  *
  * Actions:
  *   GET  ?action=validate      → fetch library list from CQL service + flag already-imported
+ *   GET  ?action=key_status    → returns whether Groq API key is saved in OpenEMR globals table
+ *   POST ?action=save_key      → saves Groq API key into OpenEMR globals table
  *   POST ?action=import&name=X → fetch ELM → simplify → Groq validates → insert into DB
  *
  * @package   OpenEMR
@@ -28,23 +30,27 @@ $CQL_SERVICE_URL = 'https://cdsconnect.org';
 $GROQ_MODEL      = 'openai/gpt-oss-120b';
 $GROQ_ENDPOINT   = 'https://api.groq.com/openai/v1/chat/completions';
 
-$GROQ_API_KEY = $GLOBALS['groq_api_token']
-             ?? $GLOBALS['groq_api_key']
-             ?? getenv('GROQ_API_KEY')
-             ?? '';
-
 $action = $_GET['action'] ?? 'validate';
 
 try {
     if ($action === 'validate') {
         handleValidate($CQL_SERVICE_URL);
+    } elseif ($action === 'key_status') {
+        handleKeyStatus();
+    } elseif ($action === 'save_key') {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['error' => 'Use POST for save_key']);
+            exit;
+        }
+        handleSaveKey();
     } elseif ($action === 'import' && isset($_GET['name'])) {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
             http_response_code(405);
             echo json_encode(['error' => 'Use POST for import']);
             exit;
         }
-        handleImport(trim($_GET['name']), $CQL_SERVICE_URL, $GROQ_API_KEY, $GROQ_MODEL, $GROQ_ENDPOINT);
+        handleImport(trim($_GET['name']), $CQL_SERVICE_URL, $GROQ_MODEL, $GROQ_ENDPOINT);
     } else {
         http_response_code(400);
         echo json_encode(['error' => 'Invalid action']);
@@ -53,6 +59,42 @@ try {
     error_log('CDS Proxy Error: ' . $e->getMessage());
     http_response_code(500);
     echo json_encode(['error' => 'Server error', 'details' => $e->getMessage()]);
+}
+
+
+// ── Groq API Key — stored in OpenEMR globals table ────────────────────────────
+
+function getGroqApiKey(): string
+{
+    $row = sqlQuery("SELECT gl_value FROM globals WHERE gl_name = 'cds_groq_api_key'");
+    return $row ? (string)($row['gl_value'] ?? '') : '';
+}
+
+function handleKeyStatus(): void
+{
+    $key = getGroqApiKey();
+    echo json_encode(['configured' => !empty($key)]);
+}
+
+function handleSaveKey(): void
+{
+    $input = json_decode(file_get_contents('php://input'), true);
+    $key   = trim($input['key'] ?? '');
+
+    if (empty($key)) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Key cannot be empty']);
+        return;
+    }
+
+    $existing = sqlQuery("SELECT gl_name FROM globals WHERE gl_name = 'cds_groq_api_key'");
+    if ($existing) {
+        sqlStatement("UPDATE globals SET gl_value = ? WHERE gl_name = 'cds_groq_api_key'", [$key]);
+    } else {
+        sqlStatement("INSERT INTO globals (gl_name, gl_value) VALUES ('cds_groq_api_key', ?)", [$key]);
+    }
+
+    echo json_encode(['success' => true]);
 }
 
 
@@ -100,7 +142,6 @@ function handleValidate(string $cqlUrl): void
 function handleImport(
     string $libraryName,
     string $cqlUrl,
-    string $groqKey,
     string $groqModel,
     string $groqEndpoint
 ): void {
@@ -110,6 +151,16 @@ function handleImport(
     if ($existing) {
         http_response_code(409);
         echo json_encode(['success' => false, 'error' => "Already imported as rule '$ruleId'"]);
+        return;
+    }
+
+    $groqKey = getGroqApiKey();
+    if (empty($groqKey)) {
+        http_response_code(422);
+        echo json_encode([
+            'success'          => false,
+            'validation_error' => 'Groq API key not configured. Please enter your key in the settings above.',
+        ]);
         return;
     }
 
@@ -278,10 +329,6 @@ function validateWithGroq(array $elmJson, string $groqKey, string $groqModel, st
         return ['valid' => false, 'errors' => ['Missing library.identifier.id']];
     }
 
-    if (empty($groqKey)) {
-        return ['valid' => true, 'errors' => []];
-    }
-
     $ch = curl_init($groqEndpoint);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -294,7 +341,7 @@ function validateWithGroq(array $elmJson, string $groqKey, string $groqModel, st
         CURLOPT_POSTFIELDS => json_encode([
             'model'       => $groqModel,
             'messages'    => [
-                ['role' => 'system', 'content' => 'You are a clinical decision support validator.'],
+                ['role' => 'system', 'content' => 'You are a clinical decision support validator. Always use the exact response format requested.'],
                 ['role' => 'user',   'content' => buildGroqPrompt($elmJson)],
             ],
             'temperature' => 0.1,
@@ -308,6 +355,7 @@ function validateWithGroq(array $elmJson, string $groqKey, string $groqModel, st
     curl_close($ch);
 
     if ($curlErr) return ['valid' => false, 'errors' => ['Groq API connection failed: ' . $curlErr]];
+    if ($httpCode === 401) return ['valid' => false, 'errors' => ['Groq API key is invalid or expired. Please update it in the settings above.']];
     if ($httpCode !== 200) return ['valid' => false, 'errors' => ['Groq API returned HTTP ' . $httpCode]];
 
     $content = json_decode($response, true)['choices'][0]['message']['content'] ?? '';
