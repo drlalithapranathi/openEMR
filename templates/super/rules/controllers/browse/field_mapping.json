@@ -1,0 +1,286 @@
+{
+  "_comment": "Field mapping: CDS Authoring Tool (ELM JSON) → OpenEMR CDS Rule tables",
+
+  "metadata_mappings": {
+    "library.identifier.id": {
+      "openemr_table": "clinical_rules",
+      "openemr_field": "id",
+      "transform": "slugify",
+      "notes": "Slugified artifact name becomes the rule ID (max 31 chars)"
+    },
+    "library.identifier.version": {
+      "openemr_table": "clinical_rules",
+      "openemr_field": "release_version",
+      "transform": "passthrough"
+    },
+    "annotation.s[].message.developer": {
+      "openemr_table": "clinical_rules",
+      "openemr_field": "developer",
+      "transform": "passthrough"
+    },
+    "annotation.bibliographic_citation": {
+      "openemr_table": "clinical_rules",
+      "openemr_field": "bibliographic_citation",
+      "transform": "passthrough",
+      "max_length": 255
+    },
+    "annotation.web_reference": {
+      "openemr_table": "clinical_rules",
+      "openemr_field": "web_reference",
+      "transform": "passthrough",
+      "max_length": 255
+    },
+    "annotation.funding_source": {
+      "openemr_table": "clinical_rules",
+      "openemr_field": "funding_source",
+      "transform": "passthrough",
+      "max_length": 255
+    }
+  },
+
+  "rule_type_mappings": {
+    "active_alert": {
+      "openemr_table": "clinical_rules",
+      "openemr_field": "active_alert_flag",
+      "value": 1,
+      "notes": "Set when recommendation triggers an active popup alert"
+    },
+    "passive_alert": {
+      "openemr_table": "clinical_rules",
+      "openemr_field": "passive_alert_flag",
+      "value": 1,
+      "notes": "Set when recommendation shows in passive alert widget"
+    },
+    "patient_reminder": {
+      "openemr_table": "clinical_rules",
+      "openemr_field": "patient_reminder_flag",
+      "value": 1,
+      "notes": "Set when recommendation triggers a patient reminder"
+    }
+  },
+
+  "criteria_type_mappings": {
+    "Demographics_AgeRange": {
+      "cds_element_type": "Demographics → Age Range",
+      "cds_fields": ["Minimum Age", "Maximum Age", "Unit of Time"],
+      "openemr_table": "rule_filter",
+      "openemr_methods": {
+        "min": {
+          "method": "age_min",
+          "value_format": "<integer> in years",
+          "include_flag": 1
+        },
+        "max": {
+          "method": "age_max",
+          "value_format": "<integer> in years",
+          "include_flag": 1
+        }
+      },
+      "unit_conversion": {
+        "years": 1,
+        "months": 0.0833,
+        "weeks": 0.0192,
+        "days": 0.0027,
+        "note": "OpenEMR age values are stored in years; convert if needed"
+      }
+    },
+    "Demographics_Gender": {
+      "cds_element_type": "Demographics → Gender",
+      "cds_fields": ["Gender"],
+      "openemr_table": "rule_filter",
+      "openemr_method": "sex",
+      "value_map": {
+        "male": "Male",
+        "female": "Female",
+        "other": null,
+        "unknown": null,
+        "note": "OpenEMR only supports Male/Female; other/unknown cannot be directly mapped"
+      }
+    },
+    "Condition": {
+      "cds_element_type": "Condition",
+      "cds_fields": ["Value Sets (OIDs)", "Individual Codes"],
+      "openemr_table": "rule_filter",
+      "openemr_method": "lists",
+      "method_detail": "issue",
+      "value_format": "<CodeSystem>:<code>",
+      "code_system_map": {
+        "http://snomed.info/sct": "SNOMED",
+        "http://hl7.org/fhir/sid/icd-10-cm": "ICD10",
+        "http://hl7.org/fhir/sid/icd-9-cm": "ICD9",
+        "http://loinc.org": "LOINC",
+        "http://www.nlm.nih.gov/research/umls/rxnorm": "RXNORM",
+        "http://ncimeta.nci.nih.gov": "NCI"
+      }
+    },
+    "Observation": {
+      "cds_element_type": "Observation",
+      "cds_fields": ["Value Sets (OIDs)", "Individual Codes"],
+      "openemr_table": "rule_filter",
+      "openemr_method": "lists",
+      "method_detail": "issue",
+      "value_format": "<CodeSystem>:<code>",
+      "notes": "Map LOINC observation codes to OpenEMR diagnosis/issue criteria"
+    },
+    "Procedure": {
+      "cds_element_type": "Procedure",
+      "cds_fields": ["Value Sets (OIDs)", "Individual Codes"],
+      "openemr_table": "rule_filter",
+      "openemr_method": "lists",
+      "method_detail": "surgery",
+      "value_format": "<CodeSystem>:<code>"
+    },
+    "MedicationStatement": {
+      "cds_element_type": "Medication Statement",
+      "cds_fields": ["Value Sets (OIDs)", "Individual Codes"],
+      "openemr_table": "rule_filter",
+      "openemr_method": "lists",
+      "method_detail": "medication",
+      "value_format": "<CodeSystem>:<code>",
+      "preferred_system": "RXNORM"
+    },
+    "MedicationRequest": {
+      "cds_element_type": "Medication Request",
+      "cds_fields": ["Value Sets (OIDs)", "Individual Codes"],
+      "openemr_table": "rule_filter",
+      "openemr_method": "lists",
+      "method_detail": "medication",
+      "value_format": "<CodeSystem>:<code>",
+      "preferred_system": "RXNORM"
+    },
+    "AllergyIntolerance": {
+      "cds_element_type": "Allergy Intolerance",
+      "cds_fields": ["Value Sets (OIDs)", "Individual Codes"],
+      "openemr_table": "rule_filter",
+      "openemr_method": "lists",
+      "method_detail": "allergy",
+      "value_format": "<CodeSystem>:<code>"
+    },
+    "Encounter": {
+      "cds_element_type": "Encounter",
+      "cds_fields": ["Value Sets (OIDs)", "Individual Codes"],
+      "openemr_table": "rule_filter",
+      "openemr_method": "database",
+      "notes": "No direct mapping; use custom table criteria or lifestyle field"
+    },
+    "Immunization": {
+      "cds_element_type": "Immunization",
+      "cds_fields": ["Value Sets (OIDs)", "Individual Codes"],
+      "openemr_table": "rule_filter",
+      "openemr_method": "lists",
+      "method_detail": "medication",
+      "notes": "Map vaccine CVX codes; OpenEMR has no native immunization filter, medication method is closest"
+    },
+    "ServiceRequest": {
+      "cds_element_type": "ServiceRequest (R4 only)",
+      "cds_fields": ["Value Sets (OIDs)", "Individual Codes"],
+      "openemr_table": "rule_filter",
+      "openemr_method": "lists",
+      "method_detail": "surgery",
+      "notes": "Map as surgical procedure criteria"
+    }
+  },
+
+  "inclusion_exclusion_flag": {
+    "inclusion": {"include_flag": 1, "required_flag": 1},
+    "exclusion": {"include_flag": 0, "required_flag": 0}
+  },
+
+  "recommendation_mappings": {
+    "Recommendation_Text": {
+      "cds_field": "Recommendation Text",
+      "openemr_table": "rule_action_item",
+      "openemr_field": "reminder_message",
+      "openemr_action_table": "rule_action",
+      "openemr_action_category": "reminder_clin",
+      "openemr_action_item": "clin_reminder_a"
+    },
+    "Recommendation_Link": {
+      "cds_field": "Links → Link Address",
+      "openemr_table": "rule_action_item",
+      "openemr_field": "clin_rem_link"
+    },
+    "Recommendation_Rationale": {
+      "cds_field": "Rationale Text",
+      "openemr_table": "rule_action_item",
+      "openemr_field": "reminder_message",
+      "notes": "Appended to reminder_message after recommendation text"
+    }
+  },
+
+  "elm_statement_name_patterns": {
+    "inclusions": [
+      "MeetsInclusionCriteria",
+      "InPopulation",
+      "Inclusion",
+      "IsIncluded"
+    ],
+    "exclusions": [
+      "MeetsExclusionCriteria",
+      "Exclusion",
+      "IsExcluded"
+    ],
+    "recommendations": [
+      "Recommendation",
+      "RecommendationText",
+      "ClinicalRecommendation"
+    ],
+    "rationale": [
+      "Rationale",
+      "RationaleText"
+    ],
+    "errors": [
+      "Errors",
+      "ErrorMessage",
+      "ErrorsHaveOccurred"
+    ]
+  },
+
+  "openemr_defaults": {
+    "active_alert_flag": 0,
+    "passive_alert_flag": 1,
+    "patient_reminder_flag": 0,
+    "cqm_flag": 0,
+    "amc_flag": 0,
+    "pid": 0,
+    "access_control": "patients:med",
+    "rule_action_category": "reminder_clin",
+    "rule_action_item": "clin_reminder_a",
+    "reminder_method": "clinical",
+    "reminder_pre_method_detail": "month",
+    "reminder_pre_value": "1",
+    "reminder_post_method_detail": "month",
+    "reminder_post_value": "1"
+  },
+
+  "unmappable_fields": [
+    {
+      "cds_field": "CPG Score",
+      "reason": "No equivalent in OpenEMR CDS rules"
+    },
+    {
+      "cds_field": "Experimental flag",
+      "reason": "No equivalent; consider storing in bibliographic_citation"
+    },
+    {
+      "cds_field": "Strength of Recommendation",
+      "reason": "No direct field; embed in reminder_message text"
+    },
+    {
+      "cds_field": "Quality of Evidence",
+      "reason": "No direct field; embed in reminder_message text"
+    },
+    {
+      "cds_field": "Subpopulations",
+      "reason": "OpenEMR does not support subpopulation-specific recommendations natively; create one rule per subpopulation"
+    },
+    {
+      "cds_field": "CDS Hooks Suggestions (MedicationRequest action)",
+      "reason": "OpenEMR rule_action can link to order forms but cannot auto-create FHIR MedicationRequests"
+    },
+    {
+      "cds_field": "Encounter criteria",
+      "reason": "OpenEMR has no native encounter-type filter; map using custom_bucket if applicable"
+    }
+  ]
+}
